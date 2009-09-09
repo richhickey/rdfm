@@ -11,37 +11,34 @@
    (java.util UUID)
    (javax.xml.datatype DatatypeFactory XMLGregorianCalendar)
    (org.openrdf.repository Repository RepositoryConnection)
-   (org.openrdf.model BNode Graph Literal Namespace Resource Statement URI Value ValueFactory)
-   (org.openrdf.repository.sail SailRepository)
-   (org.openrdf.repository.http HTTPRepository)
-   (org.openrdf.sail.memory MemoryStore)))
+   (org.openrdf.model BNode Graph Literal Namespace Resource Statement URI Value ValueFactory)))
 
 (set! *warn-on-reflection* true)
 (set! *print-meta* false)
-(def #^Repository repo (SailRepository. (MemoryStore. (java.io.File. "/Users/rich/dev/data/db"))))
-(.initialize repo)
+
+;todo - make these private
 (def #^"[Lorg.openrdf.model.Resource;" NOCONTEXT (make-array org.openrdf.model.Resource 0))
 (def KEYWORDS "http://clojure.org/keywords/")
 (def #^String RDF "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
-(def #^RepositoryConnection conn (.getConnection repo))
-(.setNamespace conn "kw" "http://clojure.org/keywords/")
-(.getNamespace conn "kw")
-(def #^ValueFactory vf (.getValueFactory conn))
-(def #^DatatypeFactory dtf (DatatypeFactory/newInstance))
-(.close conn)
-(.shutDown repo)
+(def #^RepositoryConnection *conn*)
+(def #^ValueFactory *vf*)
 
-;import java.util.GregorianCalendar;
-;import javax.xml.datatype.DatatypeFactory;
-;import javax.xml.datatype.XMLGregorianCalendar
-;GregorianCalendar c = new GregorianCalendar();
-;c.setTime(yourDate);
-;XMLGregorianCalendar date2 = DatatypeFactory.newInstance().newXMLGregorianCalendar(c);
+(defmacro dotrans [conn & body]
+  `(let [conn# ~conn]
+     (binding [*conn* conn#
+               *vf* (.getValueFactory #^RepositoryConnection conn#)]
+       (try
+        (let [ret# (do ~@body)]
+          (.commit *conn*)
+          ret#)
+        (catch Exception e#
+          (.rollback *conn*)
+          (throw e#))))))
 
-(defn kw->uri [k]
-  (.createURI vf KEYWORDS (subs (str k) 1)))
+(defn- kw->uri [k]
+  (.createURI *vf* KEYWORDS (subs (str k) 1)))
 
-(defn uri->kw [uri]
+(defn- uri->kw [uri]
   (keyword (subs (str uri) (count KEYWORDS))))
 
 (defn random-uuid-uri []
@@ -51,38 +48,32 @@
   ([] (random-bnode-id ""))
   ([prefix] (str "_:" prefix (java.util.UUID/randomUUID))))
 
-(str (.createBNode vf))
-(.getLocalName (.createURI vf  (str "urn:uuid:" (java.util.UUID/randomUUID))))
-
-(.createBNode vf  (str (java.util.UUID/randomUUID))) 
-(java.net.URI. (str "urn:uuid:" (java.util.UUID/randomUUID)))
-
 (declare store-1)
 
 (defn- resource-for [id]
   (condp instance? id
     Resource id
-    java.net.URI  (.createURI vf (str id))
-    UUID (.createURI vf "urn:uuid:" (str id))
+    java.net.URI  (.createURI *vf* (str id))
+    UUID (.createURI *vf* "urn:uuid:" (str id))
     String (if (.startsWith #^String id "_:")
-             (.createBNode vf (subs id 2))
-             (.createURI vf id))))
+             (.createBNode *vf* (subs id 2))
+             (.createURI *vf* id))))
 
 (defn- value-for [o]
   (condp instance? o
     clojure.lang.IPersistentCollection (do (assert (::id ^o)) (resource-for (::id ^o)))
     Value o
-    String (.createLiteral vf #^String o)
-    Integer (.createLiteral vf (int o))
-    Long (.createLiteral vf (long o))
-    Float (.createLiteral vf (float o))
-    Double (.createLiteral vf (double o))
-    Boolean (.createLiteral vf (boolean o))
-    java.net.URI  (.createURI vf (str o))
+    String (.createLiteral *vf* #^String o)
+    Integer (.createLiteral *vf* (int o))
+    Long (.createLiteral *vf* (long o))
+    Float (.createLiteral *vf* (float o))
+    Double (.createLiteral *vf* (double o))
+    Boolean (.createLiteral *vf* (boolean o))
+    java.net.URI  (.createURI *vf* (str o))
     clojure.lang.Keyword (kw->uri o)
-    BigInteger (.createLiteral vf (str o) (.createURI vf "http://www.w3.org/2001/XMLSchema#integer"))
-    BigDecimal (.createLiteral vf (str o) (.createURI vf  "http://www.w3.org/2001/XMLSchema#decimal"))
-    XMLGregorianCalendar (.createLiteral vf #^XMLGregorianCalendar o)))
+    BigInteger (.createLiteral *vf* (str o) (.createURI *vf* "http://www.w3.org/2001/XMLSchema#integer"))
+    BigDecimal (.createLiteral *vf* (str o) (.createURI *vf*  "http://www.w3.org/2001/XMLSchema#decimal"))
+    XMLGregorianCalendar (.createLiteral *vf* #^XMLGregorianCalendar o)))
 
 
 (def value-extractors
@@ -114,7 +105,7 @@
 
 (defn- property-uri [k]
   (cond 
-   (string? k) (.createURI vf k)
+   (string? k) (.createURI *vf* k)
    (keyword? k) (kw->uri k)
    :else (throw (IllegalArgumentException. (str "Unsupported key type: " (class k))))))
 
@@ -125,7 +116,9 @@
       id)))
 
 (defn- add-statement [s p o]
-  (.add conn (.createStatement vf s p o) NOCONTEXT))
+  (.add *conn* (.createStatement *vf* s p o) NOCONTEXT))
+
+(defmulti store-initial (fn [o & id] (class o)))
 
 (defn store-meta [o]
   (let [ret-meta (dissoc ^o ::id)]
@@ -135,7 +128,6 @@
         (with-meta o (assoc m ::id (::id ^o))))
       o)))
 
-(defmulti store-initial (fn [o & id] (class o)))
 
 (defmethod store-initial :default [x & id] x)
 
@@ -144,7 +136,7 @@
         res (resource-for id)
         ret (reduce (fn [vret i]
                       (let [v (store-initial (vec i))]
-                        (add-statement res (.createURI  vf RDF (str "_" (inc i))) (value-for v))
+                        (add-statement res (.createURI  *vf* RDF (str "_" (inc i))) (value-for v))
                         (conj vret v)))
                     [] (range (count vec)))
         ;ret (with-meta ret (assoc (meta vec) ::id id))
@@ -175,20 +167,20 @@
   ([m uri] (store-initial m uri)))
   
 (defn get-statements [id]
-  (let [res (.getStatements conn (resource-for id) nil nil false NOCONTEXT)
+  (let [res (.getStatements *conn* (resource-for id) nil nil false NOCONTEXT)
         ret (into [] (.asList res))]
     (.close res)
     ret))
 
-(defn nuke [id]
-  (.remove conn (resource-for id) nil nil NOCONTEXT))
+(defn remove-all [id]
+  (.remove *conn* (resource-for id) nil nil NOCONTEXT))
 
-(declare reload)
+(declare pull)
 
 (defn restore-value [value]
   (let [v (extract-value value)]
     (condp instance? v
-        BNode (reload v)
+        BNode (pull v)
         URI (java.net.URI. (str v))
         v)))
 
@@ -202,7 +194,7 @@
     java.net.URI uri
     URI (java.net.URI. (str uri))))
 
-(defn reload [id]
+(defn pull [id]
   (let [statements (get-statements id)
         id-str (str id)]
     (cond
@@ -225,6 +217,37 @@
                          :else (assoc m k v)))) {} statements)
             assoc ::id (uri->id id)))))
                          
+(comment
+
+;fiddle
+(import
+ (org.openrdf.repository Repository RepositoryConnection)
+ (org.openrdf.repository.sail SailRepository)
+ (org.openrdf.repository.http HTTPRepository)
+ (org.openrdf.sail.memory MemoryStore))
+
+(alias 'rdfm 'org.clojure.rdfm)
+(def #^Repository repo (SailRepository. (MemoryStore. (java.io.File. "/Users/rich/dev/data/db"))))
+(.initialize repo)
+(def c (.getConnection repo))
+
+(def x (rdfm/dotrans c
+                (rdfm/store-root {:a 1 :b 2 :c [3 4 5] :d "six" :e {:f 7 :g #{8}}})))
+(def xs (rdfm/dotrans c (rdfm/pull (::rdfm/id ^x))))
+
+(.close c)
+(.shutDown repo)
+
+;cruft needed for dates
+;import java.util.GregorianCalendar;
+;import javax.xml.datatype.DatatypeFactory;
+;import javax.xml.datatype.XMLGregorianCalendar
+;GregorianCalendar c = new GregorianCalendar();
+;c.setTime(yourDate);
+;XMLGregorianCalendar date2 = DatatypeFactory.newInstance().newXMLGregorianCalendar(c);
+;(def #^DatatypeFactory dtf (DatatypeFactory/newInstance))
+
+)
     
   
 
