@@ -18,7 +18,8 @@
 
 ;todo - make these private
 (def #^"[Lorg.openrdf.model.Resource;" NOCONTEXT (make-array org.openrdf.model.Resource 0))
-(def KEYWORDS "http://clojure.org/keywords/")
+(def KEYWORD "http://clojure.org/data/keyword/")
+(def VECTOR "http://clojure.org/data/vector/")
 (def #^String RDF "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
 (def #^RepositoryConnection *conn*)
 (def #^ValueFactory *vf*)
@@ -36,10 +37,10 @@
           (throw e#))))))
 
 (defn- kw->uri [k]
-  (.createURI *vf* KEYWORDS (subs (str k) 1)))
+  (.createURI *vf* KEYWORD (subs (str k) 1)))
 
 (defn- uri->kw [uri]
-  (keyword (subs (str uri) (count KEYWORDS))))
+  (keyword (subs (str uri) (count KEYWORD))))
 
 (defn random-uuid-uri []
   (java.net.URI. (str "urn:uuid:" (java.util.UUID/randomUUID))))
@@ -97,7 +98,7 @@
 
 (defn- extract-value [v]
   (if (instance? Resource v)
-    (if (.startsWith (str v) KEYWORDS) 
+    (if (.startsWith (str v) KEYWORD) 
       (uri->kw v) 
       v)
     ((value-extractors (str (.getDatatype #^Literal v))) v)))
@@ -107,11 +108,12 @@
   (cond 
    (string? k) (.createURI *vf* k)
    (keyword? k) (kw->uri k)
+   (integer? k) (.createURI  *vf* RDF (str "_" (inc k)))
    :else (throw (IllegalArgumentException. (str "Unsupported key type: " (class k))))))
 
 (defn- property-key [p]
   (let [id (str p)]
-    (if (.startsWith id KEYWORDS)
+    (if (.startsWith id KEYWORD)
       (uri->kw p)
       id)))
 
@@ -136,7 +138,7 @@
         res (resource-for id)
         ret (reduce (fn [vret i]
                       (let [v (store-initial (vec i))]
-                        (add-statement res (.createURI  *vf* RDF (str "_" (inc i))) (value-for v))
+                        (add-statement res (property-uri i) (value-for v))
                         (conj vret v)))
                     [] (range (count vec)))
         ;ret (with-meta ret (assoc (meta vec) ::id id))
@@ -192,8 +194,8 @@
     BNode (str uri)
     String uri
     java.net.URI uri
-    URI (java.net.URI. (str uri))))
-
+    URI (java.net.URI. (str uri))))   
+   
 (defn pull [id]
   (let [statements (get-statements id)
         id-str (str id)]
@@ -216,9 +218,17 @@
                          (contains? m k) (assoc m k (conj (setify (m k)) v))
                          :else (assoc m k v)))) {} statements)
             assoc ::id (uri->id id)))))
-                         
+   
+(defn assoc-1 [idcoll k v]
+  (let [id (if (coll? idcoll) (::id (meta idcoll)) idcoll)
+        p (property-uri k)
+        val (value-for v)]
+    ))
+    
+  
+                      
 (comment
-
+(println "foo")
 ;fiddle
 (import
  (org.openrdf.repository Repository RepositoryConnection)
@@ -233,7 +243,7 @@
 
 (def x (rdfm/dotrans c
                 (rdfm/store-root {:a 1 :b 2 :c [3 4 5] :d "six" :e {:f 7 :g #{8}}})))
-(def xs (rdfm/dotrans c (rdfm/pull (::rdfm/id ^x))))
+(def xs (rdfm/dotrans c (rdfm/pull (::org.clojure.rdfm/id ^x))))
 
 (.close c)
 (.shutDown repo)
