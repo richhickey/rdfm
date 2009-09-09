@@ -228,7 +228,6 @@
   
                       
 (comment
-(println "foo")
 ;fiddle
 (import
  (org.openrdf.repository Repository RepositoryConnection)
