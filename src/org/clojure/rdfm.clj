@@ -11,16 +11,22 @@
    (java.util UUID)
    (javax.xml.datatype DatatypeFactory XMLGregorianCalendar)
    (org.openrdf.repository Repository RepositoryConnection)
-   (org.openrdf.model BNode Graph Literal Namespace Resource Statement URI Value ValueFactory)))
+   (org.openrdf.model Literal Resource Statement URI Value ValueFactory)))
 
 (set! *warn-on-reflection* true)
 (set! *print-meta* false)
 
 ;todo - make these private
 (def #^"[Lorg.openrdf.model.Resource;" NOCONTEXT (make-array org.openrdf.model.Resource 0))
-(def KEYWORD "http://clojure.org/data/keyword/")
-(def VECTOR "http://clojure.org/data/vector/")
-(def #^String RDF "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
+(def DATA-NS "http://clojure.org/data/")
+(def SCALAR-NS (str DATA-NS "scalar/"))
+(def KEYWORD-NS (str SCALAR-NS "keyword/"))
+(def COLL-NS (str DATA-NS "collection/"))
+(def VEC-NS (str COLL-NS "vector#"))
+(def MAP-NS (str COLL-NS "hash-map#"))
+(def #^String RDF-NS "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
+(def #^String RDF-NUMBER-NS "http://www.w3.org/1999/02/22-rdf-syntax-ns#_")
+(def UUID-NS "urn:uuid:")
 (def #^RepositoryConnection *conn*)
 (def #^ValueFactory *vf*)
 
@@ -37,28 +43,21 @@
           (throw e#))))))
 
 (defn- kw->uri [k]
-  (.createURI *vf* KEYWORD (subs (str k) 1)))
+  (.createURI *vf* KEYWORD-NS (subs (str k) 1)))
 
 (defn- uri->kw [uri]
-  (keyword (subs (str uri) (count KEYWORD))))
+  (keyword (subs (str uri) (count KEYWORD-NS))))
 
-(defn random-uuid-uri []
-  (java.net.URI. (str "urn:uuid:" (java.util.UUID/randomUUID))))
-
-(defn random-bnode-id 
-  ([] (random-bnode-id ""))
-  ([prefix] (str "_:" prefix (java.util.UUID/randomUUID))))
+(defn random-uuid-uri [prefix]
+  (java.net.URI. (str prefix (java.util.UUID/randomUUID))))
 
 (declare store-1)
 
 (defn- resource-for [id]
   (condp instance? id
-    Resource id
-    java.net.URI  (.createURI *vf* (str id))
-    UUID (.createURI *vf* "urn:uuid:" (str id))
-    String (if (.startsWith #^String id "_:")
-             (.createBNode *vf* (subs id 2))
-             (.createURI *vf* id))))
+    Resource     id
+    java.net.URI (.createURI *vf* (str id))
+    String       (.createURI *vf* id)))
 
 (defn- value-for [o]
   (condp instance? o
@@ -97,25 +96,26 @@
       "http://www.w3.org/2001/XMLSchema#gDay" #(.calendarValue  #^Literal %)})
 
 (defn- extract-value [v]
-  (if (instance? Resource v)
-    (if (.startsWith (str v) KEYWORD) 
-      (uri->kw v) 
-      v)
-    ((value-extractors (str (.getDatatype #^Literal v))) v)))
+  (condp instance? v
+    URI (if (.startsWith (str v) KEYWORD-NS) 
+          (uri->kw v) 
+          v)
+    Literal ((value-extractors (str (.getDatatype #^Literal v))) v)))
   
 
 (defn- property-uri [k]
   (cond 
    (string? k) (.createURI *vf* k)
    (keyword? k) (kw->uri k)
-   (integer? k) (.createURI  *vf* RDF (str "_" (inc k)))
+   (integer? k) (.createURI  *vf* RDF-NS (str "_" (inc k)))
    :else (throw (IllegalArgumentException. (str "Unsupported key type: " (class k))))))
 
 (defn- property-key [p]
   (let [id (str p)]
-    (if (.startsWith id KEYWORD)
-      (uri->kw p)
-      id)))
+    (cond
+     (.startsWith id KEYWORD-NS) (uri->kw p)
+     (.startsWith id RDF-NUMBER-NS) (dec (-> id (subs 44) Integer/parseInt))
+     :else id)))
 
 (defn- add-statement [s p o]
   (.add *conn* (.createStatement *vf* s p o) NOCONTEXT))
@@ -125,7 +125,7 @@
 (defn store-meta [o]
   (let [ret-meta (dissoc ^o ::id)]
     (if (pos? (count ret-meta))
-      (let [m (store-initial ret-meta (random-bnode-id))]
+      (let [m (store-initial ret-meta (random-uuid-uri UUID-NS))]
         (add-statement (resource-for (::id ^o)) (property-uri ::meta) (resource-for (::id ^m)))
         (with-meta o (assoc m ::id (::id ^o))))
       o)))
@@ -134,7 +134,7 @@
 (defmethod store-initial :default [x & id] x)
 
 (defmethod store-initial clojure.lang.IPersistentVector [vec]
-  (let [id (random-bnode-id "__vec__")
+  (let [id (random-uuid-uri VEC-NS)
         res (resource-for id)
         ret (reduce (fn [vret i]
                       (let [v (store-initial (vec i))]
@@ -147,7 +147,7 @@
     ret))
 
 (defmethod store-initial clojure.lang.IPersistentMap
-  ([m] (store-initial m (random-bnode-id)))
+  ([m] (store-initial m (random-uuid-uri MAP-NS)))
   ([m id]
      (let [res (resource-for id)
            ret (reduce 
@@ -165,7 +165,7 @@
        ret)))
 
 (defn store-root 
-  ([m] (store-root m (random-uuid-uri)))
+  ([m] (store-root m (random-uuid-uri UUID-NS)))
   ([m uri] (store-initial m uri)))
   
 (defn get-statements [id]
@@ -181,17 +181,18 @@
 
 (defn restore-value [value]
   (let [v (extract-value value)]
-    (condp instance? v
-        BNode (pull v)
-        URI (java.net.URI. (str v))
-        v)))
+    (if (instance? URI v)
+      (let [id (str v)]
+        (cond
+         (.startsWith id COLL-NS) (pull id)
+         :else (java.net.URI. (str v))))
+      v)))
 
 (defn setify [x]
   (if (set? x) x #{x}))
 
 (defn uri->id [uri]
   (condp instance? uri
-    BNode (str uri)
     String uri
     java.net.URI uri
     URI (java.net.URI. (str uri))))   
@@ -200,12 +201,11 @@
   (let [statements (get-statements id)
         id-str (str id)]
     (cond
-     (.startsWith id-str "_:__vec__") (with-meta
+     (.startsWith id-str VEC-NS) (with-meta
                                        (reduce (fn [v #^Statement s]
-                                                 (let [p (.getPredicate s)
-                                                       i  (dec (-> p str (subs 44) Integer/parseInt))
+                                                 (let [p (property-key (.getPredicate s))
                                                        o (.getObject s)]
-                                                   (assoc v i (restore-value o))))
+                                                   (assoc v p (restore-value o))))
                                                (vec (repeat (count statements) nil))
                                                statements)
                                        {::id id-str})
@@ -241,7 +241,7 @@
 (def c (.getConnection repo))
 
 (def x (rdfm/dotrans c
-                (rdfm/store-root {:a 1 :b 2 :c [3 4 5] :d "six" :e {:f 7 :g #{8}}})))
+                (rdfm/store-root {:a 1 :b 2 :c [3 4 [5 6 {:seven :eight}]] :d "six" :e {:f 7 :g #{8}}})))
 (def xs (rdfm/dotrans c (rdfm/pull (::org.clojure.rdfm/id ^x))))
 
 (.close c)
