@@ -7,11 +7,14 @@
 ;   You must not remove this notice, or any other, from this software.
 
 (ns org.clojure.rdfm
+  (:refer-clojure :exclude [assoc dissoc])
   (:import 
    (java.util UUID)
    (javax.xml.datatype DatatypeFactory XMLGregorianCalendar)
    (org.openrdf.repository Repository RepositoryConnection)
    (org.openrdf.model Literal Resource Statement URI Value ValueFactory)))
+
+(alias 'core 'clojure.core)
 
 (set! *warn-on-reflection* true)
 (set! *print-meta* false)
@@ -42,6 +45,9 @@
           (.rollback *conn*)
           (throw e#))))))
 
+(defn idof [x]
+  (::id (meta x)))
+
 (defn- kw->uri [k]
   (.createURI *vf* KEYWORD-NS (subs (str k) 1)))
 
@@ -61,7 +67,7 @@
 
 (defn- value-for [o]
   (condp instance? o
-    clojure.lang.IPersistentCollection (do (assert (::id (meta o))) (resource-for (::id (meta o))))
+    clojure.lang.IPersistentCollection (do (assert (idof o)) (resource-for (idof o)))
     Value o
     String (.createLiteral *vf* #^String o)
     Integer (.createLiteral *vf* (int o))
@@ -123,31 +129,45 @@
 (defmulti store-initial (fn [o & id] (class o)))
 
 (defn store-meta [o]
-  (let [ret-meta (dissoc (meta o) ::id)]
+  (let [ret-meta (core/dissoc (meta o) ::id)]
     (if (pos? (count ret-meta))
       (let [m (store-initial ret-meta (random-uuid-uri UUID-NS))]
-        (add-statement (resource-for (::id (meta o))) (property-uri ::meta) (resource-for (::id (meta m))))
-        (with-meta o (assoc m ::id (::id (meta o)))))
+        (add-statement (resource-for (idof o)) (property-uri ::meta) (resource-for (idof m)))
+        (with-meta o (core/assoc m ::id (idof o))))
       o)))
 
 
 (defmethod store-initial :default [x & id] x)
 
 (defmethod store-initial clojure.lang.IPersistentVector [vec]
-  (let [id (random-uuid-uri VEC-NS)
-        res (resource-for id)
-        ret (reduce (fn [vret i]
-                      (let [v (store-initial (vec i))]
-                        (add-statement res (property-uri i) (value-for v))
-                        (conj vret v)))
-                    [] (range (count vec)))
-        ;ret (with-meta ret (assoc (meta vec) ::id id))
-        ;ret (store-meta ret)
-        ret (with-meta ret {::id id})]
-    ret))
+  (if (idof vec) 
+    vec
+    (let [id (random-uuid-uri VEC-NS)
+          res (resource-for id)
+          ret (reduce (fn [vret i]
+                        (let [v (store-initial (vec i))]
+                          (add-statement res (property-uri i) (value-for v))
+                          (conj vret v)))
+                      [] (range (count vec)))
+                                        ;ret (with-meta ret (assoc (meta vec) ::id id))
+                                        ;ret (store-meta ret)
+          ret (with-meta ret {::id id})]
+      ret)))
+
+(defn store-map-val [m k v]
+  (let [res (resource-for (idof m))
+        store1 (fn [v] 
+                 (let [nested (store-initial v)]
+                   (add-statement res (property-uri k) (value-for nested))
+                   nested))]
+    (cond
+     (set? v) (core/assoc m k (reduce (fn [s v] (conj s (store1 v))) #{} v))
+     :else (core/assoc m k (store1 v)))))
 
 (defmethod store-initial clojure.lang.IPersistentMap
-  ([m] (store-initial m (random-uuid-uri MAP-NS)))
+  ([m] (if (idof m)
+         m
+         (store-initial m (random-uuid-uri MAP-NS))))
   ([m id]
      (let [res (resource-for id)
            ret (reduce 
@@ -157,10 +177,10 @@
                               (add-statement res (property-uri k) (value-for nested))
                               nested))]
                     (cond
-                     (set? v) (assoc mret k (reduce (fn [s v] (conj s (store1 v))) #{} v))
-                     :else (assoc mret k (store1 v)))))
+                     (set? v) (core/assoc mret k (reduce (fn [s v] (conj s (store1 v))) #{} v))
+                     :else (core/assoc mret k (store1 v)))))
                 {} m)
-           ret (with-meta ret (assoc (meta m) ::id id))
+           ret (with-meta ret (core/assoc (meta m) ::id id))
            ret (store-meta ret)]
        ret)))
 
@@ -205,7 +225,7 @@
                                        (reduce (fn [v #^Statement s]
                                                  (let [p (property-key (.getPredicate s))
                                                        o (.getObject s)]
-                                                   (assoc v p (restore-value o))))
+                                                   (core/assoc v p (restore-value o))))
                                                (vec (repeat (count statements) nil))
                                                statements)
                                        {::id id-str})
@@ -215,18 +235,56 @@
                             v (restore-value (.getObject s))]
                         (cond 
                          (= k ::meta) (with-meta m v)
-                         (contains? m k) (assoc m k (conj (setify (m k)) v))
-                         :else (assoc m k v)))) {} statements)
-            assoc ::id (uri->id id)))))
+                         (contains? m k) (core/assoc m k (conj (setify (m k)) v))
+                         :else (core/assoc m k v)))) {} statements)
+            core/assoc ::id (uri->id id)))))
+
    
-(defn assoc-1 [idcoll k v]
-  (let [id (if (coll? idcoll) (::id (meta idcoll)) idcoll)
-        p (property-uri k)
-        val (value-for v)]
-    ))
-    
+(defn store-vec-val [vec k v]
+  (let [res (resource-for (idof vec))
+        val (store-initial v)]
+    (add-statement res (property-uri k) (value-for val))
+    (core/assoc vec k val)))
+
+(defn assoc [idcoll k v]
+  (if (vector? idcoll)
+    (store-vec-val idcoll k v)
+    (let [m (if (map? idcoll) idcoll (with-meta {} {::id idcoll}))]
+      (.remove *conn* (resource-for (idof m)) (property-uri k) nil NOCONTEXT)
+      (store-map-val m k v))))
+ 
+(defn assoc* [idcoll k v]
+  (let [m (if (map? idcoll) idcoll (with-meta {} {::id idcoll}))]
+    (if (set? v)
+      (reduce #(assoc* %1 k %2) m v)
+      (let [res (resource-for (idof m))
+            val (store-initial v)]
+        (add-statement res (property-uri k) (value-for val))
+        (core/assoc m k (conj (setify (get m k #{})) val))))))   
   
-                      
+(defn dissoc [idm k]
+  (let [id (if (map? idm) (idof idm) idm)]
+    (.remove *conn* (resource-for id) (property-uri k) nil NOCONTEXT)
+    (when (map? idm)
+      (core/dissoc idm k))))
+
+(defn dissoc* [idm k v]
+  (if (set? v)
+    (reduce #(dissoc* %1 k %2) idm v)  
+    (let [id (if (map? idm) (idof idm) idm)]
+      (.remove *conn* (resource-for id) (property-uri k) (value-for v) NOCONTEXT)
+      (if (and (map? idm) (contains? idm k))
+        (let [vs (idm k)]
+          (cond
+           (set? vs) (let [vs- (disj vs v)]
+                       (if (not-empty vs-)
+                         (core/assoc idm k vs-)
+                         (core/dissoc idm k)))
+           (= vs v) (core/dissoc idm k)
+           :else idm))
+        idm))))
+
+
 (comment
 ;fiddle
 (import
@@ -243,7 +301,12 @@
 (def x (rdfm/dotrans c
                 (rdfm/store-root {:a 1 :b 2 :c [3 4 [5 6 {:seven :eight}]] :d "six" :e {:f 7 :g #{8}}})))
 (def xs (rdfm/dotrans c (rdfm/pull (::org.clojure.rdfm/id (meta x)))))
-
+(def xss (rdfm/dotrans c (rdfm/assoc xs :a :42)))
+(def xfb (rdfm/dotrans c (update-in xss [:e] rdfm/assoc :foo :bar)))
+(def xc42 (rdfm/dotrans c (update-in xfb [:c] rdfm/assoc 0 42)))
+(def xg42 (rdfm/dotrans c (update-in xc42 [:e] rdfm/assoc* :g #{43 44})))
+(def x-b (rdfm/dotrans c (rdfm/dissoc xg42 :b)))
+(def xg44 (rdfm/dotrans c (update-in x-b [:e] rdfm/dissoc* :g 43)))
 (.close c)
 (.shutDown repo)
 

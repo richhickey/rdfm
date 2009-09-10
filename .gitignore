@@ -1,5 +1,6 @@
 classes/*
 *jar
 pom.xml
-clojure.iws
-clojure.ipr
+*.iws
+*.ipr
+*.iml
