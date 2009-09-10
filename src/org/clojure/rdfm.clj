@@ -61,7 +61,7 @@
 
 (defn- value-for [o]
   (condp instance? o
-    clojure.lang.IPersistentCollection (do (assert (::id ^o)) (resource-for (::id ^o)))
+    clojure.lang.IPersistentCollection (do (assert (::id (meta o))) (resource-for (::id (meta o))))
     Value o
     String (.createLiteral *vf* #^String o)
     Integer (.createLiteral *vf* (int o))
@@ -123,11 +123,11 @@
 (defmulti store-initial (fn [o & id] (class o)))
 
 (defn store-meta [o]
-  (let [ret-meta (dissoc ^o ::id)]
+  (let [ret-meta (dissoc (meta o) ::id)]
     (if (pos? (count ret-meta))
       (let [m (store-initial ret-meta (random-uuid-uri UUID-NS))]
-        (add-statement (resource-for (::id ^o)) (property-uri ::meta) (resource-for (::id ^m)))
-        (with-meta o (assoc m ::id (::id ^o))))
+        (add-statement (resource-for (::id (meta o))) (property-uri ::meta) (resource-for (::id (meta m))))
+        (with-meta o (assoc m ::id (::id (meta o)))))
       o)))
 
 
@@ -242,7 +242,7 @@
 
 (def x (rdfm/dotrans c
                 (rdfm/store-root {:a 1 :b 2 :c [3 4 [5 6 {:seven :eight}]] :d "six" :e {:f 7 :g #{8}}})))
-(def xs (rdfm/dotrans c (rdfm/pull (::org.clojure.rdfm/id ^x))))
+(def xs (rdfm/dotrans c (rdfm/pull (::org.clojure.rdfm/id (meta x)))))
 
 (.close c)
 (.shutDown repo)
